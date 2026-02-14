@@ -1,4 +1,5 @@
 const dataModeEl = document.getElementById('dataMode');
+const modelTypeEl = document.getElementById('modelType');
 const simControlsEl = document.getElementById('simControls');
 const tleControlsEl = document.getElementById('tleControls');
 const runBtn = document.getElementById('runBtn');
@@ -119,6 +120,76 @@ function linearRegressionPredict(points, futureSteps = 18) {
   return predicted;
 }
 
+async function lstmPredict(points, futureSteps = 18) {
+  if (typeof tf === 'undefined') {
+    return linearRegressionPredict(points, futureSteps);
+  }
+
+  const windowSize = 8;
+  if (points.length <= windowSize + 2) {
+    return linearRegressionPredict(points, futureSteps);
+  }
+
+  const vectors = points.map((p) => [p.x, p.y, p.z]);
+  const flat = vectors.flat();
+  const mean = flat.reduce((a, b) => a + b, 0) / flat.length;
+  const variance = flat.reduce((acc, value) => acc + (value - mean) ** 2, 0) / flat.length;
+  const std = Math.sqrt(variance) || 1;
+  const normalized = vectors.map((row) => row.map((value) => (value - mean) / std));
+
+  const xs = [];
+  const ys = [];
+  for (let i = 0; i < normalized.length - windowSize; i += 1) {
+    xs.push(normalized.slice(i, i + windowSize));
+    ys.push(normalized[i + windowSize]);
+  }
+
+  const xTensor = tf.tensor3d(xs);
+  const yTensor = tf.tensor2d(ys);
+
+  const model = tf.sequential();
+  model.add(tf.layers.lstm({ units: 24, inputShape: [windowSize, 3] }));
+  model.add(tf.layers.dense({ units: 3 }));
+  model.compile({ optimizer: tf.train.adam(0.01), loss: 'meanSquaredError' });
+
+  await model.fit(xTensor, yTensor, {
+    epochs: 25,
+    batchSize: Math.min(16, xs.length),
+    shuffle: true,
+    verbose: 0,
+  });
+
+  const generated = [...normalized];
+  for (let step = 0; step < futureSteps; step += 1) {
+    const window = generated.slice(generated.length - windowSize);
+    const predictionTensor = model.predict(tf.tensor3d([window]));
+    const [next] = await predictionTensor.array();
+    generated.push(next);
+    predictionTensor.dispose();
+  }
+
+  xTensor.dispose();
+  yTensor.dispose();
+  model.dispose();
+  tf.disposeVariables();
+
+  const result = generated.map((row, idx) => ({
+    t: idx,
+    x: row[0] * std + mean,
+    y: row[1] * std + mean,
+    z: row[2] * std + mean,
+  }));
+
+  return result;
+}
+
+async function predictOrbit(points, modelType) {
+  if (modelType === 'lstm') {
+    return lstmPredict(points, 18);
+  }
+  return linearRegressionPredict(points, 18);
+}
+
 function distance(p1, p2) {
   const dx = p1.x - p2.x;
   const dy = p1.y - p2.y;
@@ -159,6 +230,12 @@ function drawDashboard(satellites, alerts) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const cx = canvas.width / 2;
   const cy = canvas.height / 2;
+
+  ctx.fillStyle = '#11458a';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 60, 0, Math.PI * 2);
+  ctx.fill();
+
   const earthRadius = 60;
 
   ctx.fillStyle = '#11458a';
@@ -180,6 +257,7 @@ function drawDashboard(satellites, alerts) {
   satellites.forEach((sat, index) => {
     const hue = Math.floor((index / Math.max(1, satellites.length)) * 280 + 40);
     ctx.strokeStyle = `hsl(${hue}, 95%, 70%)`;
+    ctx.lineWidth = 1.2;
     ctx.lineWidth = 1.3;
     ctx.beginPath();
 
@@ -197,6 +275,8 @@ function drawDashboard(satellites, alerts) {
     const [leftName, rightName] = alert.pair.split(' ↔ ');
     const leftSat = satellites.find((sat) => sat.name === leftName);
     const rightSat = satellites.find((sat) => sat.name === rightName);
+    const a = leftSat?.points[alert.timeStep];
+    const b = rightSat?.points[alert.timeStep];
     if (!leftSat || !rightSat) return;
 
     const a = leftSat.points[alert.timeStep];
@@ -232,6 +312,51 @@ function renderAlerts(alerts) {
     .join('');
 }
 
+async function runDetection() {
+  const mode = dataModeEl.value;
+  const threshold = Number(thresholdEl.value) || 350;
+  const modelType = modelTypeEl.value;
+
+  runBtn.disabled = true;
+  runBtn.textContent = modelType === 'lstm' ? 'Training LSTM...' : 'Running...';
+
+  try {
+    let satellites =
+      mode === 'tle'
+        ? parseTLE(tleInputEl.value)
+        : simulateSatellites(Number(satCountEl.value) || 4, Number(seedEl.value) || 42);
+
+    if (satellites.length < 2) {
+      collisionListEl.innerHTML = 'Please provide at least two satellites.';
+      return;
+    }
+
+    const predicted = [];
+    for (const satellite of satellites) {
+      // Sequential processing keeps memory use stable when LSTM is selected.
+      const points = await predictOrbit(satellite.points, modelType);
+      predicted.push({ ...satellite, points });
+    }
+
+    const { closest, alerts } = detectCollisions(predicted, threshold);
+    const threatPercent = Number.isFinite(closest) ? computeThreatPercent(closest, threshold) : 0;
+
+    closestDistanceEl.textContent = Number.isFinite(closest) ? `${closest.toFixed(1)} km` : '--';
+    threatPercentEl.textContent = `${threatPercent}%`;
+
+    const isDanger = alerts.length > 0;
+    alertStatusEl.textContent = isDanger ? 'RED ALERT' : 'SAFE';
+    alertStatusEl.classList.toggle('danger', isDanger);
+    alertStatusEl.classList.toggle('safe', !isDanger);
+
+    renderAlerts(alerts);
+    drawDashboard(predicted, alerts);
+  } catch (error) {
+    collisionListEl.textContent = `Prediction failed: ${error.message}`;
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = 'Run Detection';
+  }
 function runDetection() {
   const mode = dataModeEl.value;
   const threshold = Number(thresholdEl.value) || 350;
@@ -274,6 +399,9 @@ dataModeEl.addEventListener('change', () => {
   tleControlsEl.classList.toggle('hidden', !useTLE);
 });
 
+runBtn.addEventListener('click', () => {
+  runDetection();
+});
 runBtn.addEventListener('click', runDetection);
 
 runDetection();

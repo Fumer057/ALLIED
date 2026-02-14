@@ -154,3 +154,9 @@ button:hover {
     grid-template-columns: 1fr;
   }
 }
+
+.hint {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin: 0.3rem 0 0.8rem;
+}
