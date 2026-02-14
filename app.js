@@ -16,6 +16,8 @@ const collisionListEl = document.getElementById('collisionList');
 const canvas = document.getElementById('orbitCanvas');
 const ctx = canvas.getContext('2d');
 
+let latestData = [];
+
 function mulberry32(seed) {
   return function random() {
     let t = (seed += 0x6d2b79f5);
@@ -234,6 +236,19 @@ function drawDashboard(satellites, alerts) {
   ctx.arc(cx, cy, 60, 0, Math.PI * 2);
   ctx.fill();
 
+  const earthRadius = 60;
+
+  ctx.fillStyle = '#11458a';
+  ctx.beginPath();
+  ctx.arc(cx, cy, earthRadius, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = '#1fa5ff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, earthRadius + 4, 0, Math.PI * 2);
+  ctx.stroke();
+
   const maxOrbit = Math.max(
     ...satellites.flatMap((sat) => sat.points.map((point) => Math.hypot(point.x, point.y))),
     1,
@@ -243,6 +258,7 @@ function drawDashboard(satellites, alerts) {
     const hue = Math.floor((index / Math.max(1, satellites.length)) * 280 + 40);
     ctx.strokeStyle = `hsl(${hue}, 95%, 70%)`;
     ctx.lineWidth = 1.2;
+    ctx.lineWidth = 1.3;
     ctx.beginPath();
 
     sat.points.forEach((point, pIndex) => {
@@ -261,6 +277,10 @@ function drawDashboard(satellites, alerts) {
     const rightSat = satellites.find((sat) => sat.name === rightName);
     const a = leftSat?.points[alert.timeStep];
     const b = rightSat?.points[alert.timeStep];
+    if (!leftSat || !rightSat) return;
+
+    const a = leftSat.points[alert.timeStep];
+    const b = rightSat.points[alert.timeStep];
     if (!a || !b) return;
 
     const ax = cx + (a.x / maxOrbit) * (canvas.width * 0.39);
@@ -337,6 +357,40 @@ async function runDetection() {
     runBtn.disabled = false;
     runBtn.textContent = 'Run Detection';
   }
+function runDetection() {
+  const mode = dataModeEl.value;
+  const threshold = Number(thresholdEl.value) || 350;
+
+  let satellites =
+    mode === 'tle'
+      ? parseTLE(tleInputEl.value)
+      : simulateSatellites(Number(satCountEl.value) || 4, Number(seedEl.value) || 42);
+
+  if (satellites.length < 2) {
+    collisionListEl.innerHTML = 'Please provide at least two satellites.';
+    return;
+  }
+
+  satellites = satellites.map((sat) => ({
+    ...sat,
+    points: linearRegressionPredict(sat.points, 18),
+  }));
+
+  latestData = satellites;
+
+  const { closest, alerts } = detectCollisions(satellites, threshold);
+  const threatPercent = Number.isFinite(closest) ? computeThreatPercent(closest, threshold) : 0;
+
+  closestDistanceEl.textContent = Number.isFinite(closest) ? `${closest.toFixed(1)} km` : '--';
+  threatPercentEl.textContent = `${threatPercent}%`;
+
+  const isDanger = alerts.length > 0;
+  alertStatusEl.textContent = isDanger ? 'RED ALERT' : 'SAFE';
+  alertStatusEl.classList.toggle('danger', isDanger);
+  alertStatusEl.classList.toggle('safe', !isDanger);
+
+  renderAlerts(alerts);
+  drawDashboard(satellites, alerts);
 }
 
 dataModeEl.addEventListener('change', () => {
@@ -348,5 +402,6 @@ dataModeEl.addEventListener('change', () => {
 runBtn.addEventListener('click', () => {
   runDetection();
 });
+runBtn.addEventListener('click', runDetection);
 
 runDetection();
